@@ -67,9 +67,13 @@ func (e *EcsNodeDTCollector) Collect(ch chan<- prometheus.Metric) {
 	nodeState := e.ecsClient.RetrieveNodeStateParallel()
 	for _, node := range nodeState {
 		// fmt.Printf("TotalDTNum: %v, UnreadyNum: %v, UnKnownNum: %v, NodeIP: %v\n", node.TotalDTnum, node.UnreadyDTnum, node.UnknownDTnum, node.NodeIP)
-		ch <- prometheus.MustNewConstMetric(dtTotal, prometheus.GaugeValue, node.TotalDTnum, node.NodeIP)
-		ch <- prometheus.MustNewConstMetric(dtUnready, prometheus.GaugeValue, node.UnreadyDTnum, node.NodeIP)
-		ch <- prometheus.MustNewConstMetric(dtUnknown, prometheus.GaugeValue, node.UnknownDTnum, node.NodeIP)
+
+		if e.ecsClient.CollectDtMetrics {
+			ch <- prometheus.MustNewConstMetric(dtTotal, prometheus.GaugeValue, node.TotalDTnum, node.NodeIP)
+			ch <- prometheus.MustNewConstMetric(dtUnready, prometheus.GaugeValue, node.UnreadyDTnum, node.NodeIP)
+			ch <- prometheus.MustNewConstMetric(dtUnknown, prometheus.GaugeValue, node.UnknownDTnum, node.NodeIP)
+		}
+
 		ch <- prometheus.MustNewConstMetric(activeConnections, prometheus.GaugeValue, node.ActiveConnections, node.NodeIP)
 		ch <- prometheus.MustNewConstMetric(nodeCpuUtilization, prometheus.GaugeValue, node.CPUUtilization, node.NodeIP)
 		ch <- prometheus.MustNewConstMetric(nodeMemoryUtilization, prometheus.GaugeValue, node.MemoryUtilization, node.NodeIP)

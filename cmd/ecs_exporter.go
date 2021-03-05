@@ -110,6 +110,16 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	collectDTMetrics := true
+	collectDTParam := r.URL.Query().Get("collect_dt")
+	if collectDTParam == "false" {
+		collectDTMetrics = false
+		log.WithFields(log.Fields{"package": "main"}).Debug("haaaaay", collectDTMetrics)
+
+	}
+
+	log.WithFields(log.Fields{"package": "main"}).Debug("haaaaay   ", collectDTMetrics)
+
 	// assume success if we fail anywhere along the line, change this to 0
 	ecsCollectionSuccess.WithLabelValues(target).Set(1)
 
@@ -165,6 +175,8 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// get perf metrics
 		// nodeexporter
+		c.CollectDtMetrics = collectDTMetrics
+
 		dtExporter, err := collector.NewEcsNodeDTCollector(c, namespace)
 		if err != nil {
 			log.WithFields(log.Fields{"package": "main"}).Errorf("Can't create exporter : %s", err)

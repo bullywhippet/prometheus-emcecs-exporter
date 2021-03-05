@@ -21,13 +21,14 @@ import (
 
 // EcsClient is used to persist connection to an ECS Cluster
 type EcsClient struct {
-	authToken      string
-	ClusterAddress string
-	EcsVersion     string
-	ErrorCount     int64
-	Config         *ecsconfig.Config
-	httpClient     *http.Client
-	Nodes          []Node
+	authToken        string
+	ClusterAddress   string
+	EcsVersion       string
+	ErrorCount       int64
+	Config           *ecsconfig.Config
+	httpClient       *http.Client
+	Nodes            []Node
+	CollectDtMetrics bool
 }
 
 // Node is the data available on /vdc/nodes
@@ -350,30 +351,31 @@ func (c *EcsClient) retrieveNodeState(node Node, ch chan<- NodeState) {
 	parsedPing := &pingList{}
 	parsedOutput.NodeIP = node.MgmtIP
 
-	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("this is the node I am querying ", node)
-	// in some clusters the DataIP and MgmtIP differ, the dt stats should come from the DataIP to account for this.
-	reqStatusURL := "http://" + node.DataIP + ":9101/stats/dt/DTInitStat"
-	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking is ", reqStatusURL)
+	if c.CollectDtMetrics {
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("this is the node I am querying ", node)
+		// in some clusters the DataIP and MgmtIP differ, the dt stats should come from the DataIP to account for this.
+		reqStatusURL := "http://" + node.DataIP + ":9101/stats/dt/DTInitStat"
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking is ", reqStatusURL)
 
-	resp, err := c.httpClient.Get(reqStatusURL)
-	if err != nil {
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster at: " + reqStatusURL)
-		atomic.AddInt64(&c.ErrorCount, 1)
-		ch <- *parsedOutput
-		return
+		resp, err := c.httpClient.Get(reqStatusURL)
+		if err != nil {
+			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster at: " + reqStatusURL)
+			atomic.AddInt64(&c.ErrorCount, 1)
+			ch <- *parsedOutput
+			return
+		}
+		defer resp.Body.Close()
+
+		bytes, _ := ioutil.ReadAll(resp.Body)
+		err = xml.Unmarshal(bytes, parsedOutput)
+		if err != nil {
+			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error un-marshaling XML from: " + reqStatusURL)
+			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error(err)
+			atomic.AddInt64(&c.ErrorCount, 1)
+			ch <- *parsedOutput
+			return
+		}
 	}
-	defer resp.Body.Close()
-
-	bytes, _ := ioutil.ReadAll(resp.Body)
-	err = xml.Unmarshal(bytes, parsedOutput)
-	if err != nil {
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error un-marshaling XML from: " + reqStatusURL)
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error(err)
-		atomic.AddInt64(&c.ErrorCount, 1)
-		ch <- *parsedOutput
-		return
-	}
-
 	// ECS supplies the current number of active connections, but its per node
 	// and its part of the s3 retrieval api (ie port 9021) so lets get this and pass it along as well
 	// and its in yet another format ... or at least xml layed out differently, so more processing is needed
