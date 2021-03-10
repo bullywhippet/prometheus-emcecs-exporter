@@ -110,15 +110,17 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	collectDTMetrics := true
+	collectDTMetrics := "1"
 	collectDTParam := r.URL.Query().Get("collect_dt")
-	if collectDTParam == "false" {
-		collectDTMetrics = false
-		log.WithFields(log.Fields{"package": "main"}).Debug("haaaaay", collectDTMetrics)
-
+	if collectDTParam == "0" || collectDTParam == "false" {
+		collectDTMetrics = "0"
 	}
 
-	log.WithFields(log.Fields{"package": "main"}).Debug("haaaaay   ", collectDTMetrics)
+	collectSystemStatsMetrics := "1"
+	collectSysStatsParam := r.URL.Query().Get("collect_sys_stats")
+	if collectSysStatsParam == "0" || collectSysStatsParam == "false" {
+		collectSystemStatsMetrics = "0"
+	}
 
 	// assume success if we fail anywhere along the line, change this to 0
 	ecsCollectionSuccess.WithLabelValues(target).Set(1)
@@ -159,7 +161,6 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := result.(*ecsclient.EcsClient)
-
 	c.RetrieveNodeInfoV2()
 	log.WithFields(log.Fields{"package": "main", "cluster_version": c.EcsVersion, "node_count": c.RetrieveNodeCount()}).Debugf("ECS Cluster Info.")
 	ecsClusterInfo.WithLabelValues(c.EcsVersion, strconv.Itoa(c.RetrieveNodeCount())).Set(1)
@@ -175,15 +176,26 @@ func queryHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// get perf metrics
 		// nodeexporter
-		c.CollectDtMetrics = collectDTMetrics
-
-		dtExporter, err := collector.NewEcsNodeDTCollector(c, namespace)
-		if err != nil {
-			log.WithFields(log.Fields{"package": "main"}).Errorf("Can't create exporter : %s", err)
-		} else {
-			log.WithFields(log.Fields{"package": "main"}).Debug("Register node DT exporter")
-			registry.MustRegister(dtExporter)
+		if collectDTMetrics == "1" {
+			dtExporter, err := collector.NewEcsNodeDTCollector(c, namespace)
+			if err != nil {
+				log.WithFields(log.Fields{"package": "main"}).Errorf("Can't create exporter : %s", err)
+			} else {
+				log.WithFields(log.Fields{"package": "main"}).Debug("Register node DT exporter")
+				registry.MustRegister(dtExporter)
+			}
 		}
+
+		if collectSystemStatsMetrics == "1" {
+			nodeSystemStatusExporter, err := collector.NewNodeSystemStatsCollector(c, namespace)
+			if err != nil {
+				log.WithFields(log.Fields{"package": "main"}).Errorf("Can't create exporter : %s", err)
+			} else {
+				log.WithFields(log.Fields{"package": "main"}).Debug("Register node system stats exporter")
+				registry.MustRegister(nodeSystemStatusExporter)
+			}
+		}
+
 		clusterExporter, err := collector.NewEcsClusterCollector(c, namespace)
 		if err != nil {
 			log.WithFields(log.Fields{"package": "main"}).Errorf("Can't create exporter : %s", err)

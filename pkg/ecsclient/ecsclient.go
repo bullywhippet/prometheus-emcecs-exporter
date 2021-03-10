@@ -21,14 +21,13 @@ import (
 
 // EcsClient is used to persist connection to an ECS Cluster
 type EcsClient struct {
-	authToken        string
-	ClusterAddress   string
-	EcsVersion       string
-	ErrorCount       int64
-	Config           *ecsconfig.Config
-	httpClient       *http.Client
-	Nodes            []Node
-	CollectDtMetrics bool
+	authToken      string
+	ClusterAddress string
+	EcsVersion     string
+	ErrorCount     int64
+	Config         *ecsconfig.Config
+	httpClient     *http.Client
+	Nodes          []Node
 }
 
 // Node is the data available on /vdc/nodes
@@ -51,14 +50,19 @@ type NodeInfoResponse struct {
 }
 
 type NodeState struct {
-	TotalDTnum        float64 `xml:"entry>total_dt_num"`
-	UnreadyDTnum      float64 `xml:"entry>unready_dt_num"`
-	UnknownDTnum      float64 `xml:"entry>unknown_dt_num"`
-	ActiveConnections float64 `xml:"entry>load_factor"`
+	TotalDTnum   float64 `xml:"entry>total_dt_num"`
+	UnreadyDTnum float64 `xml:"entry>unready_dt_num"`
+	UnknownDTnum float64 `xml:"entry>unknown_dt_num"`
+	NodeIP       string
+	NodeID       string
+}
+
+type NodeSystemStats struct {
 	NodeIP            string
 	NodeID            string
 	CPUUtilization    float64
 	MemoryUtilization float64
+	ActiveConnections float64 `xml:"entry>load_factor"`
 }
 
 type pingList struct {
@@ -346,36 +350,33 @@ func (c *EcsClient) RetrieveNodeInfoV2() {
 	c.EcsVersion = gjson.Get(s, "node.0.version").String()
 }
 
-func (c *EcsClient) retrieveNodeState(node Node, ch chan<- NodeState) {
-	parsedOutput := &NodeState{}
+func (c *EcsClient) retrieveNodeSystemStats(node Node, ch chan<- NodeSystemStats) {
+	parsedOutput := &NodeSystemStats{}
 	parsedPing := &pingList{}
 	parsedOutput.NodeIP = node.MgmtIP
 
-	if c.CollectDtMetrics {
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("this is the node I am querying ", node)
-		// in some clusters the DataIP and MgmtIP differ, the dt stats should come from the DataIP to account for this.
-		reqStatusURL := "http://" + node.DataIP + ":9101/stats/dt/DTInitStat"
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking is ", reqStatusURL)
+	// Collect the cpu & memory stats from clusterAddress:MgmtPort
+	//the system stats are in among a very large payload, ?category=health&dataType=current lets us cut that down from 16000+ lines to 73.
+	nodeSystemStatsURL := "https://" + c.ClusterAddress + ":" + strconv.Itoa(c.Config.ECS.MgmtPort) + "/dashboard/nodes/" + node.ID + "?category=health&dataType=current"
+	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking for system stats is ", nodeSystemStatsURL)
 
-		resp, err := c.httpClient.Get(reqStatusURL)
-		if err != nil {
-			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster at: " + reqStatusURL)
-			atomic.AddInt64(&c.ErrorCount, 1)
-			ch <- *parsedOutput
-			return
-		}
-		defer resp.Body.Close()
-
-		bytes, _ := ioutil.ReadAll(resp.Body)
-		err = xml.Unmarshal(bytes, parsedOutput)
-		if err != nil {
-			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error un-marshaling XML from: " + reqStatusURL)
-			log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error(err)
-			atomic.AddInt64(&c.ErrorCount, 1)
-			ch <- *parsedOutput
-			return
-		}
+	// using CallECSAPI because this call requires access to the token
+	respSystemStats, err := c.CallECSAPI(nodeSystemStatsURL)
+	if err != nil {
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster.")
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error(err)
+		atomic.AddInt64(&c.ErrorCount, 1)
+		ch <- *parsedOutput
+		return
 	}
+
+	// take the current cpu use
+	nodeSustemCPU := gjson.Get(respSystemStats, "nodeCpuUtilizationCurrent.0.Percent").Float()
+	parsedOutput.CPUUtilization = nodeSustemCPU
+	// and take the current memory use
+	nodeSystemMemory := gjson.Get(respSystemStats, "nodeMemoryUtilizationCurrent.0.Percent").Float()
+	parsedOutput.MemoryUtilization = nodeSystemMemory
+
 	// ECS supplies the current number of active connections, but its per node
 	// and its part of the s3 retrieval api (ie port 9021) so lets get this and pass it along as well
 	// and its in yet another format ... or at least xml layed out differently, so more processing is needed
@@ -403,27 +404,37 @@ func (c *EcsClient) retrieveNodeState(node Node, ch chan<- NodeState) {
 	}
 	parsedOutput.ActiveConnections = parsedPing.Value
 
-	// Collect the cpu & memory stats from clusterAddress:MgmtPort
-	//the system stats are in among a very large payload, ?category=health&dataType=current lets us cut that down from 16000+ lines to 73.
-	nodeSystemStatsURL := "https://" + c.ClusterAddress + ":" + strconv.Itoa(c.Config.ECS.MgmtPort) + "/dashboard/nodes/" + node.ID + "?category=health&dataType=current"
-	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking for system stats is ", nodeSystemStatsURL)
+	ch <- *parsedOutput
+}
 
-	// using CallECSAPI because this call requires access to the token
-	respSystemStats, err := c.CallECSAPI(nodeSystemStatsURL)
+func (c *EcsClient) retrieveNodeState(node Node, ch chan<- NodeState) {
+	parsedOutput := &NodeState{}
+	// parsedPing := &pingList{}
+	parsedOutput.NodeIP = node.MgmtIP
+
+	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("this is the node I am querying ", node)
+	// in some clusters the DataIP and MgmtIP differ, the dt stats should come from the DataIP to account for this.
+	reqStatusURL := "http://" + node.DataIP + ":9101/stats/dt/DTInitStat"
+	log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Debug("URL we are checking is ", reqStatusURL)
+
+	resp, err := c.httpClient.Get(reqStatusURL)
 	if err != nil {
-		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster.")
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error connecting to ECS Cluster at: " + reqStatusURL)
+		atomic.AddInt64(&c.ErrorCount, 1)
+		ch <- *parsedOutput
+		return
+	}
+	defer resp.Body.Close()
+
+	bytes, _ := ioutil.ReadAll(resp.Body)
+	err = xml.Unmarshal(bytes, parsedOutput)
+	if err != nil {
+		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error("Error un-marshaling XML from: " + reqStatusURL)
 		log.WithFields(log.Fields{"package": "ecsclient", "cluster": c.ClusterAddress}).Error(err)
 		atomic.AddInt64(&c.ErrorCount, 1)
 		ch <- *parsedOutput
 		return
 	}
-
-	// take the current cpu use
-	nodeSustemCPU := gjson.Get(respSystemStats, "nodeCpuUtilizationCurrent.0.Percent").Float()
-	parsedOutput.CPUUtilization = nodeSustemCPU
-	// and take the current memory use
-	nodeSystemMemory := gjson.Get(respSystemStats, "nodeMemoryUtilizationCurrent.0.Percent").Float()
-	parsedOutput.MemoryUtilization = nodeSystemMemory
 	ch <- *parsedOutput
 }
 
@@ -441,6 +452,21 @@ func (c *EcsClient) RetrieveNodeStateParallel() []NodeState {
 		NodeStates = append(NodeStates, <-ch)
 	}
 	return NodeStates
+}
+
+func (c *EcsClient) RetrieveNodeystemStatusParallel() []NodeSystemStats {
+	var NodeSystemStatz []NodeSystemStats
+
+	ch := make(chan NodeSystemStats)
+
+	for _, node := range c.Nodes {
+		go c.retrieveNodeSystemStats(node, ch)
+	}
+
+	for range c.Nodes {
+		NodeSystemStatz = append(NodeSystemStatz, <-ch)
+	}
+	return NodeSystemStatz
 }
 
 // ZeroErrorCount resets the error count for this client. This should be called after we have recorded any existing error count
